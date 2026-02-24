@@ -347,4 +347,29 @@ export class BusinessRepository extends BaseRepository<Business> {
       FROM businesses b
       LEFT JOIN invoices i ON i.business_id = b.id
         AND i.created_at BETWEEN $1 AND $2
-        AND i.deleted_at IS
+        AND i.deleted_at IS NULL
+      WHERE b.deleted_at IS NULL
+      GROUP BY b.id, b.name, b.tin
+      ORDER BY total_revenue DESC
+      LIMIT $3
+    `;
+
+    return this.executeQuery(query, [fromDate, toDate, limit]);
+  }
+
+  /**
+   * Get features for subscription tier
+   */
+  private getFeaturesForTier(tier: Business['subscription_tier']): string[] {
+    const features = {
+      free: ['e-invoicing', 'basic-analytics', 'email-support'],
+      starter: ['e-invoicing', 'advanced-analytics', 'integrations', 'email-support', 'api-access'],
+      growth: ['e-invoicing', 'advanced-analytics', 'integrations', 'priority-support', 'api-access', 'multi-user'],
+      enterprise: ['e-invoicing', 'advanced-analytics', 'integrations', 'dedicated-support', 'api-access', 'multi-user', 'white-label', 'custom-integrations'],
+    };
+
+    return features[tier] || features.free;
+  }
+}
+
+export const businessRepository = new BusinessRepository();
