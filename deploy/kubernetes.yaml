@@ -1,0 +1,390 @@
+# Kubernetes Deployment Configuration for Elexsol API
+
+---
+# ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elexsol-config
+  namespace: elexsol
+data:
+  NODE_ENV: "production"
+  DB_HOST: "postgres-service"
+  DB_PORT: "5432"
+  DB_NAME: "elexsol"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  FIRS_ENVIRONMENT: "sandbox"
+  LOG_LEVEL: "info"
+  API_URL: "https://api.elexsol.com"
+
+---
+# Secrets (should be applied separately or from vault)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: elexsol-secrets
+  namespace: elexsol
+type: Opaque
+stringData:
+  DB_USER: "elexsol_admin"
+  DB_PASSWORD: "change-me-in-production"
+  REDIS_PASSWORD: "change-me-in-production"
+  JWT_SECRET: "change-me-in-production"
+  JWT_REFRESH_SECRET: "change-me-in-production"
+  ENCRYPTION_KEY: "change-me-in-production"
+  FIRS_API_KEY: "change-me-in-production"
+  FIRS_CLIENT_ID: "change-me-in-production"
+  FIRS_CLIENT_SECRET: "change-me-in-production"
+  FIRS_CSID: "change-me-in-production"
+  EMAIL_HOST: "smtp.gmail.com"
+  EMAIL_USER: "change-me-in-production"
+  EMAIL_PASSWORD: "change-me-in-production"
+  EMAIL_FROM: "noreply@elexsol.com"
+
+---
+# API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elexsol-api
+  namespace: elexsol
+  labels:
+    app: elexsol
+    component: api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elexsol
+      component: api
+  template:
+    metadata:
+      labels:
+        app: elexsol
+        component: api
+    spec:
+      containers:
+      - name: api
+        image: elexsol/api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+        envFrom:
+        - configMapRef:
+            name: elexsol-config
+        - secretRef:
+            name: elexsol-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+        - name: certs
+          mountPath: /app/certs
+          readOnly: true
+        - name: uploads
+          mountPath: /app/uploads
+      volumes:
+      - name: logs
+        emptyDir: {}
+      - name: certs
+        secret:
+          secretName: elexsol-certs
+      - name: uploads
+        persistentVolumeClaim:
+          claimName: elexsol-uploads-pvc
+
+---
+# API Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: elexsol-api-service
+  namespace: elexsol
+spec:
+  selector:
+    app: elexsol
+    component: api
+  ports:
+  - port: 80
+    targetPort: 3000
+    name: http
+  type: ClusterIP
+
+---
+# PostgreSQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: elexsol
+spec:
+  serviceName: postgres-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          value: "elexsol"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: elexsol-secrets
+              key: DB_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elexsol-secrets
+              key: DB_PASSWORD
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: elexsol
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  clusterIP: None
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: elexsol
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        command: ["redis-server"]
+        args: ["--appendonly", "yes", "--requirepass", "$(REDIS_PASSWORD)"]
+        ports:
+        - containerPort: 6379
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elexsol-secrets
+              key: REDIS_PASSWORD
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: redis-data
+        emptyDir: {}
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: elexsol
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+
+---
+# Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: elexsol-ingress
+  namespace: elexsol
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  tls:
+  - hosts:
+    - api.elexsol.com
+    secretName: elexsol-tls
+  rules:
+  - host: api.elexsol.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: elexsol-api-service
+            port:
+              number: 80
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: elexsol-api-hpa
+  namespace: elexsol
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: elexsol-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# Persistent Volume Claim for uploads
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: elexsol-uploads-pvc
+  namespace: elexsol
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: elexsol-network-policy
+  namespace: elexsol
+spec:
+  podSelector:
+    matchLabels:
+      app: elexsol
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: elexsol-api-pdb
+  namespace: elexsol
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: elexsol
+      component: api
